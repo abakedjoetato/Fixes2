@@ -93,16 +93,21 @@ class LogProcessorCog(commands.Cog):
         # Start background task
         self.process_logs_task.start()
 
-    def cog_unload(self):
+    async def cog_unload(self):
         """Stop background tasks and close connections when cog is unloaded"""
-        self.process_logs_task.cancel()
+        if hasattr(self, 'process_logs_task') and self.process_logs_task:
+            self.process_logs_task.cancel()
 
         # Close all SFTP connections
-        for server_id, sftp_manager in self.sftp_managers.items():
-            try:
-                asyncio.create_task(sftp_manager.disconnect())
-            except Exception as e:
-                logger.error(f"Log processor starting: No servers configured")
+        if hasattr(self, 'sftp_managers'):
+            for server_id, sftp_manager in self.sftp_managers.items():
+                try:
+                    if asyncio.iscoroutinefunction(sftp_manager.disconnect):
+                        await sftp_manager.disconnect()
+                    else:
+                        asyncio.create_task(sftp_manager.disconnect())
+                except Exception as e:
+                    logger.error(f"Error disconnecting SFTP manager for server {server_id}: {e}")
 
     @tasks.loop(minutes=3.0)  # Set to 3 minutes as per requirements
     async def process_logs_task(self):
@@ -884,7 +889,7 @@ class LogProcessorCog(commands.Cog):
         description="Manually process game log files"
     )
     @admin_permission_decorator()
-    @premium_feature_required(feature_name="stats", min_tier=1)  # Require Survivor tier for log processing
+    @premium_feature_required(feature_name="stats")  # Require premium tier for log processing
     @app_commands.autocomplete(server_id=server_id_autocomplete)
     async def process_logs_command(
         self,
@@ -967,7 +972,7 @@ class LogProcessorCog(commands.Cog):
         description="Show log processor status"
     )
     @admin_permission_decorator()
-    @premium_feature_required(feature_name="stats", min_tier=1)  # Require Survivor tier for log status
+    @premium_feature_required(feature_name="stats")  # Require premium tier for log status
     async def log_status_command(self, interaction: discord.Interaction):
         """Show log processor status
 

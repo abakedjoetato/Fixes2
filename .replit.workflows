@@ -1,2 +1,2 @@
-[discord-bot]
-run = "bash run_discord_bot.sh"
+[workflows."Start Discord Bot"]
+    command = ["python", "run_discord_bot.py"]

@@ -278,12 +278,13 @@ async def log_premium_access_attempt(
         # Just log the error and continue - this is a non-critical operation
         logger.error(f"Failed to log premium access attempt: {e}")
 
-def premium_feature_required(feature_name: str):
+def premium_feature_required(feature_name: str, min_tier: Optional[int] = None):
     """
     Decorator to require premium access for a command.
     
     Args:
         feature_name: Name of the required feature
+        min_tier: Minimum tier required (overrides feature mapping if provided)
         
     Returns:
         Decorator function
@@ -298,7 +299,11 @@ def premium_feature_required(feature_name: str):
             
             if not db:
                 logger.error("Database not available for premium verification")
-                await ctx.send("⚠️ Server error: Unable to verify premium status.")
+                # Check if ctx is an Interaction or Context
+                if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                    await ctx.response.send_message("⚠️ Server error: Unable to verify premium status.", ephemeral=True)
+                elif hasattr(ctx, 'send'):
+                    await ctx.send("⚠️ Server error: Unable to verify premium status.")
                 return
             
             # Get the guild ID from the context
@@ -309,30 +314,49 @@ def premium_feature_required(feature_name: str):
                 guild_id = ctx.guild_id
             
             if not guild_id:
-                await ctx.send("⚠️ This command can only be used in a server.")
+                if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                    await ctx.response.send_message("⚠️ This command can only be used in a server.", ephemeral=True)
+                elif hasattr(ctx, 'send'):
+                    await ctx.send("⚠️ This command can only be used in a server.")
                 return
             
-            # Verify premium status
-            has_premium = await verify_premium_for_feature(db, guild_id, feature_name)
+            # If min_tier was provided explicitly, use it instead of feature mapping
+            required_tier = min_tier if min_tier is not None else get_required_tier_for_feature(feature_name)
+            
+            # Check if user has required tier by getting guild tier and comparing
+            guild_tier = await get_guild_tier(db, guild_id)
+            has_premium = guild_tier >= required_tier if required_tier is not None else False
+            
+            # Also check feature-based access if no explicit min_tier was provided
+            if not has_premium and min_tier is None:
+                has_premium = await verify_premium_for_feature(db, guild_id, feature_name)
             
             if not has_premium:
-                # Get the required tier for better messaging
-                required_tier = get_required_tier_for_feature(feature_name)
+                # Get the tier name for better messaging
                 tier_name = next((name for name, level in TIER_LEVELS.items() 
                                  if level == required_tier), "premium")
                 
-                await ctx.send(
-                    f"⚠️ This feature requires the `{tier_name.title()}` tier or higher. "
-                    f"Use `/premium info` to learn more about upgrading."
-                )
+                # Handle both Interaction and Context objects
+                if hasattr(ctx, 'response') and hasattr(ctx.response, 'send_message'):
+                    await ctx.response.send_message(
+                        f"⚠️ This feature requires the `{tier_name.title()}` tier or higher. "
+                        f"Use `/premium info` to learn more about upgrading.",
+                        ephemeral=True
+                    )
+                elif hasattr(ctx, 'send'):
+                    await ctx.send(
+                        f"⚠️ This feature requires the `{tier_name.title()}` tier or higher. "
+                        f"Use `/premium info` to learn more about upgrading."
+                    )
                 return
             
             # If has premium, call the original function
             return await func(self, ctx, *args, **kwargs)
         
-        # Store the feature name in the wrapper function's attributes
-        # We use setattr to avoid LSP errors with directly assigning to __premium_feature__
+        # Store the feature name and min_tier in the wrapper function's attributes
         setattr(wrapper, "__premium_feature__", feature_name)
+        if min_tier is not None:
+            setattr(wrapper, "__premium_min_tier__", min_tier)
         return wrapper
     
     return decorator
