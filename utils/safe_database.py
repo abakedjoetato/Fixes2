@@ -6,6 +6,7 @@ error handling, type checking, and consistent patterns.
 """
 
 import logging
+import asyncio
 from typing import Any, Dict, List, Optional, Union, TypeVar, Generic, cast
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,29 @@ logger = logging.getLogger(__name__)
 # Type variables for generic function annotations
 T = TypeVar('T')
 D = TypeVar('D', bound=Dict[str, Any])
+
+# For class-based pattern
+class SafeDocument:
+    """Wrapper for MongoDB documents with safe access methods"""
+    
+    def __init__(self, document: Optional[Dict[str, Any]] = None):
+        self.document = document or {}
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Safely get a value from the document"""
+        return safe_get(self.document, key, default)
+    
+    def get_nested(self, path: str, default: Any = None) -> Any:
+        """Safely get a nested value from the document"""
+        return safe_get_nested(self.document, path, default)
+    
+    def has_field(self, key: str) -> bool:
+        """Check if document has a field"""
+        return key in self.document
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return self.document
 
 def safe_get(data: Optional[Dict[str, Any]], key: str, default: T = None) -> Optional[T]:
     """
@@ -197,6 +221,177 @@ async def find_documents_safely(collection, query: Dict[str, Any],
     except Exception as e:
         logger.error(f"Error finding documents: {e}")
         return []
+
+# Additional safe database access functions
+async def safe_get_db(db_instance, db_name: Optional[str] = None):
+    """
+    Safely get a database instance with error handling
+    
+    Args:
+        db_instance: MongoDB client instance
+        db_name: Name of the database to access
+        
+    Returns:
+        Database instance or None if error occurs
+    """
+    if db_instance is None:
+        logger.error("No database instance provided")
+        return None
+    
+    try:
+        if db_name:
+            return db_instance[db_name]
+        elif hasattr(db_instance, 'get_default_database'):
+            return db_instance.get_default_database()
+        else:
+            return db_instance  # Assume db_instance is already a database
+    except Exception as e:
+        logger.error(f"Error getting database: {e}")
+        return None
+
+async def safe_get_collection(db, collection_name: str):
+    """
+    Safely get a collection from a database with error handling
+    
+    Args:
+        db: MongoDB database instance
+        collection_name: Name of the collection to access
+        
+    Returns:
+        Collection instance or None if error occurs
+    """
+    if db is None:
+        logger.error("No database instance provided")
+        return None
+    
+    if not collection_name:
+        logger.error("No collection name provided")
+        return None
+    
+    try:
+        return db[collection_name]
+    except Exception as e:
+        logger.error(f"Error getting collection {collection_name}: {e}")
+        return None
+
+async def safe_find_one(collection, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Safely find a single document with error handling
+    
+    Args:
+        collection: MongoDB collection
+        query: Query to find the document
+        
+    Returns:
+        Document dict or None if not found or error occurs
+    """
+    return await get_document_safely(collection, query)
+
+async def safe_update_one(collection, query: Dict[str, Any], update: Dict[str, Any], 
+                         upsert: bool = False) -> bool:
+    """
+    Safely update a document with error handling
+    
+    Args:
+        collection: MongoDB collection
+        query: Query to find the document
+        update: Update operation
+        upsert: Whether to insert if document doesn't exist
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    return await safely_update_document(collection, query, update, upsert)
+
+async def safe_insert_one(collection, document: Dict[str, Any]) -> Optional[str]:
+    """
+    Safely insert a document with error handling
+    
+    Args:
+        collection: MongoDB collection
+        document: Document to insert
+        
+    Returns:
+        ID of inserted document or None if error occurs
+    """
+    if collection is None:
+        return None
+    
+    try:
+        result = await collection.insert_one(document)
+        return str(result.inserted_id) if result.inserted_id else None
+    except Exception as e:
+        logger.error(f"Error inserting document: {e}")
+        return None
+
+async def safe_count_documents(collection, query: Dict[str, Any]) -> int:
+    """
+    Safely count documents with error handling
+    
+    Args:
+        collection: MongoDB collection
+        query: Query to count matching documents
+        
+    Returns:
+        Count of matching documents or 0 if error occurs
+    """
+    return await count_documents_safely(collection, query)
+
+def safe_get_document_field(document: Optional[Dict[str, Any]], field: str, 
+                           default: Any = None) -> Any:
+    """
+    Safely get a field from a document with error handling
+    
+    Args:
+        document: Document dict
+        field: Field name to access
+        default: Default value if field doesn't exist
+        
+    Returns:
+        Field value or default if not found
+    """
+    return safe_get(document, field, default)
+
+def safe_document_to_dict(document: Any) -> Dict[str, Any]:
+    """
+    Safely convert a MongoDB document to a dictionary
+    
+    Args:
+        document: MongoDB document or document-like object
+        
+    Returns:
+        Dictionary representation of the document
+    """
+    if document is None:
+        return {}
+    
+    if isinstance(document, dict):
+        return document
+    
+    if hasattr(document, 'to_dict'):
+        return document.to_dict()
+        
+    if hasattr(document, '__dict__'):
+        return document.__dict__
+    
+    logger.warning(f"Unable to convert document of type {type(document)} to dict")
+    return {}
+
+def has_field(document: Optional[Dict[str, Any]], field: str) -> bool:
+    """
+    Check if a document has a field
+    
+    Args:
+        document: Document dict
+        field: Field name to check
+        
+    Returns:
+        True if field exists, False otherwise
+    """
+    if document is None:
+        return False
+    
+    return field in document
 
 def get_field_with_type_check(data: Optional[Dict[str, Any]], key: str, 
                             expected_type: type, default: T) -> T:
