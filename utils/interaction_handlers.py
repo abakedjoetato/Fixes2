@@ -1,327 +1,275 @@
 """
-Enhanced interaction handlers for py-cord compatibility
+Interaction Handlers for py-cord 2.6.1 Compatibility
 
-This module provides compatibility layers for interacting with Discord's
-interaction system across different versions of py-cord and discord.py.
-It specifically addresses the issue where Interaction.respond is not available
-in py-cord 2.6.1.
+This module provides utility functions for handling interactions and responses
+with compatibility across different versions of py-cord and discord.py.
 """
 
 import logging
-import inspect
-import asyncio
-from typing import Optional, Union, Any, Dict, Callable, List, TypeVar, cast
+import traceback
+from typing import Any, Dict, List, Optional, Union, Callable, TypeVar, Awaitable
 
 import discord
 from discord.ext import commands
 
+from utils.command_imports import (
+    is_compatible_with_pycord_261,
+    PYCORD_261,
+    HAS_APP_COMMANDS
+)
+
 logger = logging.getLogger(__name__)
 
-# Py-cord compatibility constants
-HAS_RESPOND_METHOD = hasattr(discord.Interaction, "respond")
-HAS_RESPONSE_PROPERTY = hasattr(discord.Interaction, "response")
-
-# Type definitions for better type checking
-InteractionResponseType = Optional[Union[discord.Message, discord.WebhookMessage]]
-EmbedType = Optional[discord.Embed]
-EmbedsType = Optional[List[discord.Embed]]
-FileType = Optional[discord.File]
-FilesType = Optional[List[discord.File]]
-ViewType = Optional[discord.ui.View]
-AllowedMentionsType = Optional[discord.AllowedMentions]
+# Define a type for interaction or context
+InteractionOrCtx = Union[discord.Interaction, commands.Context]
 
 async def safely_respond_to_interaction(
     interaction: discord.Interaction,
     content: Optional[str] = None,
     *,
-    embed: EmbedType = None,
-    embeds: EmbedsType = None,
+    embed: Optional[discord.Embed] = None,
+    embeds: Optional[List[discord.Embed]] = None,
+    file: Optional[discord.File] = None,
+    files: Optional[List[discord.File]] = None,
+    view: Optional[discord.ui.View] = None,
     ephemeral: bool = False,
-    view: ViewType = None,
-    tts: bool = False,
-    file: FileType = None,
-    files: FilesType = None,
-    allowed_mentions: AllowedMentionsType = None,
     delete_after: Optional[float] = None,
-    wait: bool = False
-) -> InteractionResponseType:
+    **kwargs
+) -> Optional[Union[discord.Message, discord.InteractionMessage, discord.WebhookMessage]]:
     """
-    Safely respond to an interaction with py-cord compatibility
+    Safely respond to an interaction with py-cord 2.6.1 compatibility
     
-    This function handles the differences between py-cord and discord.py
-    for responding to interactions.
+    This function handles the differences between py-cord 2.6.1 and other versions
+    when responding to interactions.
     
     Args:
-        interaction: The Discord interaction to respond to
-        content: Text content of the response
-        embed: A single embed to include
-        embeds: List of embeds to include (overrides embed)
-        ephemeral: Whether the message should be ephemeral
-        view: View components to include
-        tts: Text-to-speech flag
-        file: Single file attachment
-        files: List of file attachments
-        allowed_mentions: Allowed mentions config
-        delete_after: Time in seconds to delete after
-        wait: Whether to wait for the message
+        interaction: The interaction to respond to
+        content: Optional content for the response
+        embed: Optional embed for the response
+        embeds: Optional list of embeds for the response
+        file: Optional file for the response
+        files: Optional list of files for the response
+        view: Optional view for the response
+        ephemeral: Whether the response should be ephemeral
+        delete_after: Optional time after which to delete the response
+        **kwargs: Additional parameters for the response
         
     Returns:
-        Optional message object if successful
+        The response message, if available
     """
-    try:
-        # Special case for embeds - if we have a single embed, ensure it's properly set
-        if embed is not None and embeds is None:
-            embeds = [embed]
+    if not interaction:
+        logger.warning("Cannot respond to None interaction")
+        return None
         
-        # Determine what response mechanism is available
-        if interaction.response.is_done():
-            # Already responded or deferred, use followup
-            try:
-                # py-cord followup (most common case)
-                kwargs = {
-                    "content": content,
-                    "embeds": embeds,
-                    "ephemeral": ephemeral,
-                    "view": view,
-                    "tts": tts,
-                    "allowed_mentions": allowed_mentions,
-                }
-                
-                # Add optional parameters only if they're provided
-                if file is not None:
-                    kwargs["file"] = file
-                if files is not None:
-                    kwargs["files"] = files
-                if wait:
-                    kwargs["wait"] = wait
+    try:
+        # Check if the interaction has already been responded to
+        is_responded = False
+        
+        # Check the interaction's response attribute based on library version
+        if is_compatible_with_pycord_261():
+            # py-cord 2.6.1 uses interaction.response and has an is_done() method
+            if hasattr(interaction, 'response') and interaction.response:
+                if hasattr(interaction.response, 'is_done') and callable(interaction.response.is_done):
+                    is_responded = interaction.response.is_done()
+        else:
+            # Other libraries might use different attributes
+            is_responded = getattr(interaction, "_responded", False)
+        
+        # Create a kwargs dict for the response
+        response_kwargs = {
+            "content": content,
+            "ephemeral": ephemeral,
+            **kwargs
+        }
+        
+        # Add embed or embeds if provided
+        if embed:
+            response_kwargs["embed"] = embed
+        elif embeds:
+            response_kwargs["embeds"] = embeds
+            
+        # Add file or files if provided
+        if file:
+            response_kwargs["file"] = file
+        elif files:
+            response_kwargs["files"] = files
+            
+        # Add view if provided
+        if view:
+            response_kwargs["view"] = view
+        
+        # Handle the response based on whether it's already been responded to
+        if not is_responded:
+            # First response - use the send_message method with library compatibility
+            if is_compatible_with_pycord_261():
+                # py-cord 2.6.1 uses interaction.response.send_message
+                if hasattr(interaction, 'response') and hasattr(interaction.response, 'send_message'):
+                    await interaction.response.send_message(**response_kwargs)
                     
-                return await interaction.followup.send(**kwargs)
-            except (AttributeError, TypeError) as e:
-                # Discord.py fallback or channel is None
-                logger.warning(f"Followup send failed, trying channel: {e}")
-                if interaction.channel:
-                    kwargs = {
-                        "content": content,
-                        "embeds": embeds,
-                        "view": view,
-                        "tts": tts,
-                        "allowed_mentions": allowed_mentions,
-                    }
+                    # Get the message from followup if available
+                    if hasattr(interaction, 'followup') and hasattr(interaction.followup, 'message'):
+                        return interaction.followup.message
                     
-                    # Add optional parameters only if they're provided
-                    if file is not None:
-                        kwargs["file"] = file
-                    if files is not None:
-                        kwargs["files"] = files
-                    if delete_after is not None:
-                        kwargs["delete_after"] = delete_after
-                        
-                    return await interaction.channel.send(**kwargs)
+                    # Otherwise, return None as we can't get the message object
+                    return None
                 else:
-                    logger.error("No channel available for response")
+                    logger.warning("Cannot find response.send_message on interaction")
+                    return None
+            else:
+                # Other libraries might use respond
+                if hasattr(interaction, 'respond') and callable(interaction.respond):
+                    return await interaction.respond(**response_kwargs)
+                else:
+                    logger.warning("Cannot find respond method on interaction")
                     return None
         else:
-            # Not yet responded - this is the py-cord 2.6.1 path
-            try:
-                kwargs = {
-                    "content": content,
-                    "embeds": embeds,
-                    "ephemeral": ephemeral,
-                    "view": view,
-                    "tts": tts,
-                    "allowed_mentions": allowed_mentions,
-                }
-                
-                # Add optional parameters only if they're provided
-                if file is not None:
-                    kwargs["file"] = file
-                if files is not None:
-                    kwargs["files"] = files
-                    
-                # py-cord 2.x - this is the primary path for py-cord 2.6.1
-                return await interaction.response.send_message(**kwargs)
-            except (AttributeError, TypeError) as e:
-                # Discord.py path (respond) - not expected with py-cord 2.6.1
-                logger.warning(f"Response send_message failed, trying respond: {e}")
-                if HAS_RESPOND_METHOD:
-                    kwargs = {
-                        "content": content,
-                        "embeds": embeds,
-                        "ephemeral": ephemeral,
-                        "view": view,
-                        "tts": tts,
-                        "allowed_mentions": allowed_mentions,
-                    }
-                    
-                    # Add optional parameters
-                    if file is not None:
-                        kwargs["file"] = file
-                    if files is not None:
-                        kwargs["files"] = files
-                    if delete_after is not None:
-                        kwargs["delete_after"] = delete_after
-                        
-                    # This needs a cast to ignore the typing error since py-cord doesn't have this
-                    interaction_with_respond = cast(Any, interaction)
-                    return await interaction_with_respond.respond(**kwargs)
+            # Follow-up response - use followup/edit_original_message with library compatibility
+            if is_compatible_with_pycord_261():
+                # py-cord 2.6.1 uses interaction.followup.send for follow-ups
+                if hasattr(interaction, 'followup') and hasattr(interaction.followup, 'send'):
+                    return await interaction.followup.send(**response_kwargs)
                 else:
-                    # Fallback for older versions
-                    logger.error("Could not find a compatible way to respond to the interaction")
+                    logger.warning("Cannot find followup.send on interaction")
+                    
+                    # Try channel.send as a fallback
+                    if hasattr(interaction, 'channel') and interaction.channel:
+                        if hasattr(interaction.channel, 'send') and callable(interaction.channel.send):
+                            return await interaction.channel.send(**response_kwargs)
+                    
+                    return None
+            else:
+                # Other libraries might use send_message/edit_original_message
+                if hasattr(interaction, 'edit_original_message') and callable(interaction.edit_original_message):
+                    return await interaction.edit_original_message(**response_kwargs)
+                elif hasattr(interaction, 'send_message') and callable(interaction.send_message):
+                    return await interaction.send_message(**response_kwargs)
+                elif hasattr(interaction, 'send') and callable(interaction.send):
+                    return await interaction.send(**response_kwargs)
+                else:
+                    logger.warning("Cannot find appropriate follow-up method on interaction")
                     return None
     except Exception as e:
         logger.error(f"Error responding to interaction: {e}")
+        logger.error(traceback.format_exc())
+        
+        # Try to respond with a generic error message
         try:
-            # Last-resort attempt
-            if interaction.channel:
-                await interaction.channel.send(content="There was an error processing this command.")
+            if is_compatible_with_pycord_261():
+                # Check if we can send a followup
+                if hasattr(interaction, 'followup') and hasattr(interaction.followup, 'send'):
+                    await interaction.followup.send(
+                        content="An error occurred while processing your request.",
+                        ephemeral=True
+                    )
+            else:
+                # Try using send as a fallback
+                if hasattr(interaction, 'send') and callable(interaction.send):
+                    await interaction.send(
+                        content="An error occurred while processing your request.",
+                        ephemeral=True
+                    )
         except Exception:
-            pass
+            # If this fails too, just log it
+            logger.error("Failed to send error message to user")
+        
         return None
 
-async def defer_interaction(
+async def get_interaction_user(interaction_or_ctx: InteractionOrCtx) -> Optional[discord.User]:
+    """
+    Get the user from an interaction or context with library compatibility
+    
+    Args:
+        interaction_or_ctx: The interaction or context
+        
+    Returns:
+        The user, or None if not found
+    """
+    try:
+        if isinstance(interaction_or_ctx, discord.Interaction):
+            # For interactions, use user attribute
+            return getattr(interaction_or_ctx, 'user', None)
+        elif isinstance(interaction_or_ctx, commands.Context):
+            # For context, use author attribute
+            return getattr(interaction_or_ctx, 'author', None)
+        else:
+            logger.warning(f"Unknown interaction type: {type(interaction_or_ctx)}")
+            return None
+    except Exception as e:
+        logger.error(f"Error getting interaction user: {e}")
+        return None
+
+async def send_modal(
     interaction: discord.Interaction,
-    *,
-    ephemeral: bool = False,
-    thinking: bool = True
+    title: str,
+    input_fields: List[Dict[str, Any]],
+    custom_id: Optional[str] = None
 ) -> bool:
     """
-    Safely defer an interaction with py-cord compatibility
-    
-    This function handles the differences between py-cord and discord.py
-    for deferring interactions.
+    Send a modal with py-cord 2.6.1 compatibility
     
     Args:
-        interaction: The Discord interaction to defer
-        ephemeral: Whether the response should be ephemeral
-        thinking: Whether to show a thinking state
+        interaction: The interaction to respond with a modal
+        title: The title of the modal
+        input_fields: List of input field definitions
+        custom_id: Optional custom ID for the modal
         
     Returns:
-        bool: True if successful, False otherwise
+        bool: True if the modal was sent successfully, False otherwise
     """
     try:
-        if interaction.response.is_done():
-            # Already responded or deferred
-            return True
-        
-        # Primary path for py-cord 2.6.1
-        try:
-            # Specify only the parameters we know are valid for py-cord 2.6.1
-            kwargs = {"ephemeral": ephemeral}
+        # Generate custom_id if not provided
+        if not custom_id:
+            custom_id = f"modal_{title.lower().replace(' ', '_')}"
             
-            # Some versions of py-cord support thinking
-            if hasattr(interaction.response, "defer") and "thinking" in inspect.signature(interaction.response.defer).parameters:
-                kwargs["thinking"] = thinking
+        if is_compatible_with_pycord_261():
+            # py-cord 2.6.1 uses Modal class
+            # Check what version of Modal class we have
+            try:
+                # Import Modal and InputText classes
+                from discord.ui import Modal, InputText
                 
-            await interaction.response.defer(**kwargs)
-            return True
-        except (AttributeError, TypeError) as e:
-            # Fallback for discord.py or very old py-cord
-            logger.warning(f"Response defer failed, trying alternate method: {e}")
-            
-            if HAS_DEFER_METHOD:
-                # This is for discord.py - cast to avoid type errors
-                interaction_with_defer = cast(Any, interaction)
-                await interaction_with_defer.defer(ephemeral=ephemeral)
-                return True
-            else:
-                # Final fallback - just send a message
-                logger.error("Could not find a compatible way to defer the interaction")
-                await safely_respond_to_interaction(
-                    interaction,
-                    content="Processing your request...",
-                    ephemeral=ephemeral
-                )
-                return False
-    except Exception as e:
-        logger.error(f"Error deferring interaction: {e}")
-        try:
-            # If all else fails, try to send a message
-            if not interaction.response.is_done():
-                await safely_respond_to_interaction(
-                    interaction,
-                    content="Processing your request...",
-                    ephemeral=ephemeral
-                )
-        except Exception:
-            pass
-        return False
-
-def create_modal(
-    title: str,
-    custom_id: str,
-    inputs: Dict[str, Dict[str, Any]]
-) -> discord.ui.Modal:
-    """
-    Create a modal dialog with compatibility across library versions
-    
-    Args:
-        title: Modal title
-        custom_id: Custom ID for the modal
-        inputs: Dictionary of inputs where keys are custom_ids and values are configs
-        
-    Returns:
-        Modal object
-    """
-    try:
-        # This check ensures we're using the proper Modal class
-        if hasattr(discord.ui, "Modal"):
-            # py-cord 2.x - this is the preferred path for py-cord 2.6.1
-            modal = discord.ui.Modal(title=title, custom_id=custom_id)
-            
-            # Determine which input class to use - py-cord 2.6.1 uses TextInput
-            input_class = None
-            if hasattr(discord.ui, "TextInput"):
-                input_class = discord.ui.TextInput
-                style_enum = getattr(discord, "TextInputStyle", None)
-            elif hasattr(discord.ui, "InputText"):
-                input_class = discord.ui.InputText
-                style_enum = getattr(discord, "InputTextStyle", None)
-            else:
-                logger.error("Could not find appropriate input text class")
-                raise ValueError("No appropriate input text class found")
-            
-            # Add each input with appropriate parameters
-            for input_id, config in inputs.items():
-                # Default style to short (1) if style_enum not found
-                default_style = style_enum.short if style_enum else 1
-                
-                # Create input parameters with only supported attributes
-                item_kwargs = {
-                    "label": config.get("label", "Input"),
-                    "custom_id": input_id,
-                    "style": config.get("style", default_style),
-                    "required": config.get("required", True),
-                }
-                
-                # Add optional parameters only if they are provided
-                placeholder = config.get("placeholder", None)
-                if placeholder is not None:
-                    item_kwargs["placeholder"] = placeholder
-                
-                default = config.get("default", None)
-                if default is not None:
-                    item_kwargs["default"] = default
-                
-                min_length = config.get("min_length", None)
-                if min_length is not None:
-                    item_kwargs["min_length"] = min_length
+                # Create a new Modal subclass
+                class DynamicModal(Modal):
+                    def __init__(self, title, custom_id, input_fields):
+                        super().__init__(title=title, custom_id=custom_id)
+                        
+                        # Add each input field
+                        for field in input_fields:
+                            self.add_item(InputText(
+                                label=field.get("label", "Input"),
+                                placeholder=field.get("placeholder", ""),
+                                value=field.get("value", ""),
+                                required=field.get("required", True),
+                                style=field.get("style", InputText.short),
+                                custom_id=field.get("custom_id", f"input_{len(self.children)}")
+                            ))
                     
-                max_length = config.get("max_length", None)
-                if max_length is not None:
-                    item_kwargs["max_length"] = max_length
+                    async def callback(self, interaction):
+                        # Default callback - for custom handling, caller should add their own
+                        results = {}
+                        for child in self.children:
+                            results[child.custom_id] = child.value
+                        
+                        await interaction.response.send_message(f"Modal submitted: {results}", ephemeral=True)
                 
-                # Create and add the input element
-                input_item = input_class(**item_kwargs)
-                modal.add_item(input_item)
-            
-            return modal
+                # Create the modal instance
+                modal = DynamicModal(title=title, custom_id=custom_id, input_fields=input_fields)
+                
+                # Send the modal
+                if hasattr(interaction, 'response') and hasattr(interaction.response, 'send_modal'):
+                    await interaction.response.send_modal(modal)
+                    return True
+                else:
+                    logger.warning("Cannot find response.send_modal on interaction")
+                    return False
+            except ImportError as e:
+                logger.error(f"Error importing Modal/InputText: {e}")
+                return False
         else:
-            # Fallback for older versions - although py-cord 2.6.1 should have Modal
-            logger.error("Modal creation is not supported in this version")
-            raise ValueError("Modal creation not supported")
+            # Other libraries might have different methods
+            logger.warning("Modal support for non-py-cord libraries not implemented")
+            return False
     except Exception as e:
-        logger.error(f"Error creating modal: {e}")
-        raise ValueError(f"Modal creation failed: {e}") from e
-
-# Detect if defer method exists directly on Interaction
-HAS_DEFER_METHOD = hasattr(discord.Interaction, "defer")
+        logger.error(f"Error sending modal: {e}")
+        logger.error(traceback.format_exc())
+        return False

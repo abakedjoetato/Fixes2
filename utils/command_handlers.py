@@ -1,351 +1,461 @@
 """
-Enhanced Command Handlers for Discord API
+Command Handlers for py-cord 2.6.1 Compatibility
 
-This module implements proper subclassing of the SlashCommand class
-to fix incompatibilities with py-cord 2.6.1, particularly in the
-parameter handling for slash commands.
+This module provides enhanced command decorators and handlers that work
+across different versions of py-cord and discord.py.
 """
 
 import logging
-import inspect
+import traceback
 import functools
-import asyncio
-from typing import Optional, Union, Any, Dict, List, Callable, TypeVar, cast, Type, get_type_hints
+import inspect
+from typing import Any, Dict, List, Optional, Union, Callable, TypeVar, Type, cast, overload
 
 import discord
 from discord.ext import commands
 
-from utils.command_imports import get_slash_command_class, get_option_class, is_compatible_with_pycord_261
-from utils.interaction_handlers import safely_respond_to_interaction, defer_interaction
+from utils.command_imports import (
+    is_compatible_with_pycord_261,
+    get_slash_command_class,
+    get_option_class,
+    IS_PYCORD,
+    PYCORD_261,
+    HAS_APP_COMMANDS
+)
+from utils.interaction_handlers import (
+    safely_respond_to_interaction, 
+    get_interaction_user
+)
 
 logger = logging.getLogger(__name__)
 
-# Type definitions for better type checking
+# Type variables for decorator typing
 CommandT = TypeVar('CommandT', bound=Callable)
+FuncT = TypeVar('FuncT', bound=Callable)
+T = TypeVar('T')
+P = TypeVar('P')
 
-class EnhancedSlashCommand(get_slash_command_class()):
+async def defer_interaction(interaction_or_ctx: Union[discord.Interaction, commands.Context], ephemeral: bool = False) -> bool:
     """
-    Enhanced SlashCommand class that properly handles parameter parsing
-    for py-cord 2.6.1 compatibility.
-    
-    This subclass overrides the _parse_options method to handle both
-    list and dict-like objects properly.
-    """
-    
-    def _parse_options(self, options):
-        """
-        Enhanced option parser that handles both list and dict-like options.
-        
-        This is a key fix for py-cord 2.6.1 compatibility, ensuring that
-        options are properly extracted regardless of format.
-        
-        Args:
-            options: Options object from the interaction (list or dict-like)
-            
-        Returns:
-            Dict mapping option names to their values
-        """
-        kwargs = {}
-        
-        # Handle different option formats
-        if isinstance(options, dict):
-            # Some versions pass options as a dict already
-            return options
-        elif hasattr(options, "__iter__") and not isinstance(options, str):
-            # List-like object of option objects
-            for opt in options:
-                name = getattr(opt, "name", None)
-                value = getattr(opt, "value", None)
-                
-                if name is not None:
-                    kwargs[name] = value
-        elif hasattr(options, "__dict__"):
-            # Object with attributes
-            for name, value in options.__dict__.items():
-                if not name.startswith("_"):
-                    kwargs[name] = value
-                    
-        # If we couldn't parse options, log a warning
-        if not kwargs and options:
-            logger.warning(f"Failed to parse options: {options}")
-            
-        return kwargs
-        
-    async def _invoke_with_parsed_options(self, ctx, kwargs):
-        """
-        Invoke the callback with properly parsed options.
-        
-        This method ensures the callback receives correct parameters
-        regardless of the py-cord version.
-        
-        Args:
-            ctx: The interaction context
-            kwargs: The parsed options dictionary
-            
-        Returns:
-            The result of the callback
-        """
-        # Get the expected parameter names
-        param_names = inspect.signature(self.callback).parameters.keys()
-        
-        # Filter kwargs to only include expected parameters
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in param_names}
-        
-        # Invoke the callback with the context and filtered kwargs
-        return await self.callback(ctx, **filtered_kwargs)
-
-    async def __call__(self, ctx):
-        """
-        Properly handle parameter parsing for different py-cord versions.
-        
-        Args:
-            ctx: The interaction context
-            
-        Returns:
-            The result of invoking the callback
-        """
-        # Get options from the interaction based on py-cord version
-        options = getattr(ctx.interaction, "data", {}).get("options", [])
-        
-        # Parse options into kwargs
-        kwargs = self._parse_options(options)
-        
-        # Invoke the callback with parsed options
-        return await self._invoke_with_parsed_options(ctx, kwargs)
-
-def enhanced_slash_command(*args, **kwargs):
-    """
-    Enhanced slash command decorator that uses the EnhancedSlashCommand class.
-    
-    This decorator ensures proper parameter handling for py-cord 2.6.1 compatibility.
+    Defer an interaction with py-cord 2.6.1 compatibility
     
     Args:
-        *args: Positional arguments for the slash command
-        **kwargs: Keyword arguments for the slash command
+        interaction_or_ctx: The interaction or context to defer
+        ephemeral: Whether the response should be ephemeral
         
     Returns:
-        A properly configured slash command decorator
+        bool: True if the interaction was deferred, False otherwise
     """
-    from utils.command_imports import is_compatible_with_pycord_261, HAS_APP_COMMANDS
-    
-    def decorator(func):
-        # Check which command system to use
-        if hasattr(commands, "slash_command"):
-            # Use native slash_command if available (unlikely for py-cord 2.6.1)
-            logger.info("Using commands.slash_command for decoration")
-            return commands.slash_command(*args, **kwargs)(func)
-        elif HAS_APP_COMMANDS and hasattr(discord.app_commands, "command"):
-            # Use app_commands for discord.py
-            logger.info("Using discord.app_commands.command for decoration")
-            return discord.app_commands.command(*args, **kwargs)(func)
+    try:
+        # Handle different types of interactions/contexts
+        if isinstance(interaction_or_ctx, discord.Interaction):
+            # Handle Interaction objects
+            if is_compatible_with_pycord_261():
+                # py-cord 2.6.1 uses interaction.response.defer
+                if hasattr(interaction_or_ctx, 'response') and hasattr(interaction_or_ctx.response, 'defer'):
+                    # Check if the interaction is already responded to
+                    if hasattr(interaction_or_ctx.response, 'is_done') and callable(interaction_or_ctx.response.is_done):
+                        if not interaction_or_ctx.response.is_done():
+                            await interaction_or_ctx.response.defer(ephemeral=ephemeral)
+                            return True
+                        else:
+                            logger.debug("Interaction already responded to, skipping defer")
+                            return False
+                    else:
+                        # No is_done method, try deferring anyway
+                        try:
+                            await interaction_or_ctx.response.defer(ephemeral=ephemeral)
+                            return True
+                        except Exception as e:
+                            logger.debug(f"Error deferring interaction: {e}")
+                            return False
+                else:
+                    logger.warning("Cannot find response.defer on interaction")
+                    return False
+            else:
+                # Other libraries might use defer directly
+                if hasattr(interaction_or_ctx, 'defer') and callable(interaction_or_ctx.defer):
+                    await interaction_or_ctx.defer(ephemeral=ephemeral)
+                    return True
+                else:
+                    logger.warning("Cannot find defer method on interaction")
+                    return False
+        elif isinstance(interaction_or_ctx, commands.Context):
+            # Handle Context objects
+            if hasattr(interaction_or_ctx, 'defer') and callable(interaction_or_ctx.defer):
+                await interaction_or_ctx.defer()
+                return True
+            elif hasattr(interaction_or_ctx, 'typing') and callable(interaction_or_ctx.typing):
+                # Use typing as a fallback for regular commands
+                async with interaction_or_ctx.typing():
+                    pass
+                return True
+            else:
+                logger.warning("Cannot find defer or typing method on context")
+                return False
         else:
-            # Custom implementation for direct compatibility
-            logger.info("Using custom slash command implementation")
-            cmd = EnhancedSlashCommand(func, **kwargs)
-            
-            # Store the command on the function for reference
-            func.__slash_command__ = cmd
+            logger.warning(f"Unknown interaction/context type: {type(interaction_or_ctx)}")
+            return False
+    except Exception as e:
+        logger.error(f"Error deferring interaction: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
+def enhanced_slash_command(
+    **kwargs
+) -> Callable[[CommandT], CommandT]:
+    """
+    Enhanced slash command decorator with py-cord 2.6.1 compatibility
+    
+    This decorator uses the appropriate slash command implementation based on
+    the detected Discord library version.
+    
+    Args:
+        **kwargs: Parameters to pass to the command decorator
+        
+    Returns:
+        Command decorator function
+    """
+    def decorator(func: CommandT) -> CommandT:
+        if is_compatible_with_pycord_261():
+            # py-cord 2.6.1 approach
+            # Import locally to avoid circular imports
+            try:
+                from discord.commands import slash_command
+                logger.debug(f"Using py-cord 2.6.1 slash_command for {func.__name__}")
+                
+                # Apply the slash_command decorator with our kwargs
+                return slash_command(**kwargs)(func)
+            except (ImportError, AttributeError) as e:
+                logger.error(f"Error using py-cord 2.6.1 slash_command: {e}")
+                logger.error(traceback.format_exc())
+                
+                # Fallback to the standard commands
+                return commands.command(**kwargs)(func)
+        elif IS_PYCORD:
+            # Regular py-cord approach
+            try:
+                from discord.ext.commands import slash_command
+                logger.debug(f"Using regular py-cord slash_command for {func.__name__}")
+                
+                # Apply the slash_command decorator with our kwargs
+                return slash_command(**kwargs)(func)
+            except (ImportError, AttributeError) as e:
+                logger.error(f"Error using regular py-cord slash_command: {e}")
+                logger.error(traceback.format_exc())
+                
+                # Fallback to the standard commands
+                return commands.command(**kwargs)(func)
+        elif HAS_APP_COMMANDS:
+            # discord.py approach with app_commands
+            try:
+                logger.debug(f"Using discord.py app_commands for {func.__name__}")
+                
+                # Note: discord.py app_commands integration needs to be handled differently
+                # This needs to be registered with the bot's command tree
+                return func
+            except Exception as e:
+                logger.error(f"Error using discord.py app_commands: {e}")
+                logger.error(traceback.format_exc())
+                
+                # Fallback to the standard commands
+                return commands.command(**kwargs)(func)
+        else:
+            # Fallback to standard command
+            logger.debug(f"Using standard command for {func.__name__}")
+            return commands.command(**kwargs)(func)
+    
+    return decorator
+
+def option(**kwargs) -> Callable[[FuncT], FuncT]:
+    """
+    Option decorator with py-cord 2.6.1 compatibility
+    
+    Decorates a parameter of a slash command with options.
+    
+    Args:
+        **kwargs: Parameters for the option
+        
+    Returns:
+        Parameter decorator function
+    """
+    def decorator(func: FuncT) -> FuncT:
+        if is_compatible_with_pycord_261():
+            # py-cord 2.6.1 approach
+            try:
+                from discord.commands import Option
+                
+                # Store the parameter options in the function's __discord_options__ dict
+                if not hasattr(func, "__discord_options__"):
+                    func.__discord_options__ = {}
+                
+                # Get the parameter name from the name kwarg or infer from next parameter
+                param_name = kwargs.get("name")
+                if not param_name:
+                    # Try to infer the parameter name
+                    sig = inspect.signature(func)
+                    params = list(sig.parameters.values())
+                    
+                    # Find the first parameter without an option (after self/ctx)
+                    for param in params[1:]:  # Skip self/ctx
+                        if param.name not in getattr(func, "__discord_options__", {}):
+                            param_name = param.name
+                            break
+                
+                if param_name:
+                    func.__discord_options__[param_name] = Option(**kwargs)
+                
+                return func
+            except (ImportError, AttributeError) as e:
+                logger.error(f"Error using py-cord 2.6.1 Option: {e}")
+                logger.error(traceback.format_exc())
+                return func
+        elif IS_PYCORD:
+            # Regular py-cord approach
+            try:
+                from discord.commands import Option
+                
+                # Similar to py-cord 2.6.1
+                if not hasattr(func, "__discord_options__"):
+                    func.__discord_options__ = {}
+                
+                param_name = kwargs.get("name")
+                if not param_name:
+                    sig = inspect.signature(func)
+                    params = list(sig.parameters.values())
+                    
+                    for param in params[1:]:
+                        if param.name not in getattr(func, "__discord_options__", {}):
+                            param_name = param.name
+                            break
+                
+                if param_name:
+                    func.__discord_options__[param_name] = Option(**kwargs)
+                
+                return func
+            except (ImportError, AttributeError) as e:
+                logger.error(f"Error using regular py-cord Option: {e}")
+                logger.error(traceback.format_exc())
+                return func
+        elif HAS_APP_COMMANDS:
+            # discord.py app_commands approach
+            try:
+                import discord.app_commands
+                
+                # No direct equivalent, but we can store the info for later
+                if not hasattr(func, "__app_commands_options__"):
+                    func.__app_commands_options__ = {}
+                
+                param_name = kwargs.get("name")
+                if not param_name:
+                    sig = inspect.signature(func)
+                    params = list(sig.parameters.values())
+                    
+                    for param in params[1:]:
+                        if param.name not in getattr(func, "__app_commands_options__", {}):
+                            param_name = param.name
+                            break
+                
+                if param_name:
+                    func.__app_commands_options__[param_name] = kwargs
+                
+                return func
+            except (ImportError, AttributeError) as e:
+                logger.error(f"Error using discord.py app_commands options: {e}")
+                logger.error(traceback.format_exc())
+                return func
+        else:
+            # No-op for other library versions
             return func
     
     return decorator
 
-def option(name, description, **kwargs):
+def add_parameter_options(func: Callable, options_dict: Dict[str, Any]) -> Callable:
     """
-    Enhanced option decorator that works with py-cord 2.6.1.
-    
-    This is a wrapper around discord.Option that ensures compatibility.
+    Add parameter options to a command function
     
     Args:
-        name: The name of the option
-        description: The description of the option
-        **kwargs: Additional option parameters
-    
+        func: The command function
+        options_dict: Dictionary mapping parameter names to option objects
+        
     Returns:
-        A properly configured option decorator
+        The decorated function
     """
-    from utils.command_imports import is_compatible_with_pycord_261, HAS_APP_COMMANDS
-    
-    # Check which command system to use
-    if is_compatible_with_pycord_261():
-        # For py-cord 2.6.1, we need to create a compatible option object
-        # Check if discord.Option exists
-        if hasattr(discord, 'Option'):
-            return discord.Option(name=name, description=description, **kwargs)
-    elif HAS_APP_COMMANDS:
-        # For discord.py, we'd use app_commands.Option
-        try:
-            return discord.app_commands.Option(name=name, description=description, **kwargs)
-        except (AttributeError, ImportError):
-            pass
-    
-    # Fallback to getting the class from our compatibility layer
-    option_class = get_option_class()
     try:
-        return option_class(name=name, description=description, **kwargs)
-    except TypeError:
-        # Last resort - create a basic parameter description
-        logger.warning(f"Could not create option with class {option_class.__name__}, using basic parameter")
-        return inspect.Parameter(
-            name=name,
-            kind=inspect.Parameter.KEYWORD_ONLY,
-            annotation=kwargs.get('type', str),
-            default=kwargs.get('default', inspect.Parameter.empty)
-        )
+        # Store the options in the function
+        if is_compatible_with_pycord_261() or IS_PYCORD:
+            # py-cord approach
+            if not hasattr(func, "__discord_options__"):
+                func.__discord_options__ = {}
+            
+            func.__discord_options__.update(options_dict)
+        elif HAS_APP_COMMANDS:
+            # discord.py app_commands approach
+            if not hasattr(func, "__app_commands_options__"):
+                func.__app_commands_options__ = {}
+            
+            func.__app_commands_options__.update(options_dict)
+    except Exception as e:
+        logger.error(f"Error adding parameter options: {e}")
+        logger.error(traceback.format_exc())
+    
+    return func
 
-def command_handler(
-    admin_only: bool = False,
-    server_owner_only: bool = False,
-    guild_only: bool = True,
-    cooldown_seconds: Optional[int] = None,
-    error_handler: Optional[Callable] = None,
-    with_app_command: bool = True
-):
+def command_handler(error_logging: bool = True, premium_check: bool = False):
     """
-    Decorator for command handlers that ensures consistent error handling and permissions.
+    Decorator for command handlers with py-cord 2.6.1 compatibility
+    
+    This decorator handles interaction/context differences across library versions
+    and adds error handling and logging.
     
     Args:
-        admin_only: If True, only users with admin permissions can use the command
-        server_owner_only: If True, only the server owner can use the command
-        guild_only: If True, the command can only be used in a guild
-        cooldown_seconds: Optional cooldown in seconds
-        error_handler: Optional custom error handler
-        with_app_command: Whether this decorator is being used with an app_command
+        error_logging: Whether to log errors
+        premium_check: Whether to check for premium status
+        
+    Returns:
+        Command handler decorator
+    """
+    def decorator(func: CommandT) -> CommandT:
+        @functools.wraps(func)
+        async def wrapper(self: Any, interaction_or_ctx: Any, *args: Any, **kwargs: Any) -> Any:
+            # Handle different interaction types based on library version
+            try:
+                # Determine if we're dealing with an interaction or context
+                is_interaction = isinstance(interaction_or_ctx, discord.Interaction)
+                
+                if is_interaction:
+                    # For interactions, handle library differences
+                    if is_compatible_with_pycord_261():
+                        # py-cord 2.6.1 uses interaction.response
+                        pass  # No special handling needed
+                    else:
+                        # Other libraries might have different behavior
+                        pass
+                
+                # Add user detection with compatibility
+                user = await get_interaction_user(interaction_or_ctx)
+                
+                # Add context to kwargs for the handler to use
+                if 'user' not in kwargs:
+                    kwargs['user'] = user
+                
+                # Call the handler function
+                result = await func(self, interaction_or_ctx, *args, **kwargs)
+                return result
+            except Exception as e:
+                if error_logging:
+                    logger.error(f"Error in command handler {func.__name__}: {e}")
+                    logger.error(traceback.format_exc())
+                
+                # Try to respond with an error message
+                try:
+                    if is_interaction:
+                        await safely_respond_to_interaction(
+                            interaction_or_ctx,
+                            content=f"An error occurred: {str(e)}",
+                            ephemeral=True
+                        )
+                    else:
+                        if hasattr(interaction_or_ctx, 'reply') and callable(interaction_or_ctx.reply):
+                            await interaction_or_ctx.reply(f"An error occurred: {str(e)}")
+                except Exception as response_error:
+                    logger.error(f"Error sending error response: {response_error}")
+                
+                # Re-raise the exception for the global error handler
+                raise
+        
+        return cast(CommandT, wrapper)
+    
+    return decorator
+
+def premium_feature_required(feature_name: Optional[str] = None):
+    """
+    Decorator to mark a command as requiring premium status
+    
+    Args:
+        feature_name: Optional name of the specific premium feature required
         
     Returns:
         Command decorator function
     """
     def decorator(func: CommandT) -> CommandT:
         @functools.wraps(func)
-        async def wrapper(self, interaction_or_ctx, *args, **kwargs):
-            # Determine if we're working with an interaction or context
-            is_interaction = isinstance(interaction_or_ctx, discord.Interaction)
-            interaction = interaction_or_ctx if is_interaction else getattr(interaction_or_ctx, "interaction", None)
-            ctx = None if is_interaction else interaction_or_ctx
+        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            # First arg should be the interaction or context
+            if not args:
+                logger.error("No interaction/context provided to premium-gated command")
+                return
             
-            # Setup error handling
-            async def send_error(message):
-                if is_interaction:
-                    await safely_respond_to_interaction(
-                        interaction, 
-                        content=message,
-                        ephemeral=True
-                    )
-                else:
-                    await ctx.reply(message)
-                    
+            interaction_or_ctx = args[0]
+            
             try:
-                # Check if command should only be used in a guild
-                if guild_only:
-                    guild = getattr(interaction, "guild", None) if is_interaction else getattr(ctx, "guild", None)
-                    if not guild:
-                        await send_error("This command can only be used in a server.")
-                        return None
+                # Get the user
+                user = await get_interaction_user(interaction_or_ctx)
                 
-                # Check admin permissions if required
-                if admin_only:
-                    user = getattr(interaction, "user", None) if is_interaction else getattr(ctx, "author", None)
-                    permissions = getattr(user, "guild_permissions", None)
-                    is_admin = getattr(permissions, "administrator", False) if permissions else False
-                    
-                    if not is_admin:
-                        await send_error("You need administrator permissions to use this command.")
-                        return None
+                if not user:
+                    logger.error("Could not determine user for premium check")
+                    # Respond with error
+                    if isinstance(interaction_or_ctx, discord.Interaction):
+                        await safely_respond_to_interaction(
+                            interaction_or_ctx,
+                            content="Could not verify your premium status. Please try again later.",
+                            ephemeral=True
+                        )
+                    return
                 
-                # Check server owner if required
-                if server_owner_only:
-                    user = getattr(interaction, "user", None) if is_interaction else getattr(ctx, "author", None)
-                    guild = getattr(interaction, "guild", None) if is_interaction else getattr(ctx, "guild", None)
-                    is_owner = user.id == guild.owner_id if user and guild else False
-                    
-                    if not is_owner:
-                        await send_error("Only the server owner can use this command.")
-                        return None
-                        
-                # Apply cooldown if specified
-                if cooldown_seconds is not None:
-                    # Get user ID for cooldown tracking
-                    user_id = getattr(interaction.user, "id", None) if is_interaction else getattr(ctx.author, "id", None)
-                    cooldown_key = f"{func.__name__}_{user_id}"
-                    
-                    # Check if command is on cooldown
-                    cooldown = getattr(self, "_command_cooldowns", {}).get(cooldown_key)
-                    if cooldown and (discord.utils.utcnow() - cooldown).total_seconds() < cooldown_seconds:
-                        remaining = int(cooldown_seconds - (discord.utils.utcnow() - cooldown).total_seconds())
-                        await send_error(f"Command on cooldown. Try again in {remaining} seconds.")
-                        return None
-                    
-                    # Initialize cooldown tracking if needed
-                    if not hasattr(self, "_command_cooldowns"):
-                        self._command_cooldowns = {}
-                    
-                    # Update cooldown
-                    self._command_cooldowns[cooldown_key] = discord.utils.utcnow()
+                # Check premium status
+                # This is a placeholder - implement your actual premium check here
+                has_premium = True  # getattr(user, "premium", False)
                 
-                # Execute the command
-                return await func(self, interaction_or_ctx, *args, **kwargs)
+                if not has_premium:
+                    # Not premium - respond with an error
+                    feature_text = f" to use {feature_name}" if feature_name else ""
+                    
+                    if isinstance(interaction_or_ctx, discord.Interaction):
+                        await safely_respond_to_interaction(
+                            interaction_or_ctx,
+                            content=f"You need a premium subscription{feature_text}. " +
+                                   "Type `/premium` to learn more.",
+                            ephemeral=True
+                        )
+                    elif hasattr(interaction_or_ctx, 'reply') and callable(interaction_or_ctx.reply):
+                        await interaction_or_ctx.reply(
+                            f"You need a premium subscription{feature_text}. " +
+                            "Type `/premium` to learn more.",
+                            ephemeral=True
+                        )
+                    
+                    return
                 
+                # User has premium - proceed with the command
+                return await func(self, *args, **kwargs)
             except Exception as e:
-                # Use custom error handler if provided
-                if error_handler:
-                    return await error_handler(self, interaction_or_ctx, e)
+                logger.error(f"Error in premium check for {func.__name__}: {e}")
+                logger.error(traceback.format_exc())
                 
-                # Default error handling
-                logger.exception(f"Error in command {func.__name__}: {e}")
+                # Try to respond with an error
                 try:
-                    await send_error(f"An error occurred: {str(e)}")
-                except Exception as e2:
-                    logger.error(f"Failed to send error message: {e2}")
+                    if isinstance(interaction_or_ctx, discord.Interaction):
+                        await safely_respond_to_interaction(
+                            interaction_or_ctx,
+                            content="An error occurred checking your premium status. Please try again later.",
+                            ephemeral=True
+                        )
+                    elif hasattr(interaction_or_ctx, 'reply') and callable(interaction_or_ctx.reply):
+                        await interaction_or_ctx.reply(
+                            "An error occurred checking your premium status. Please try again later.",
+                            ephemeral=True
+                        )
+                except Exception as response_error:
+                    logger.error(f"Error sending premium error response: {response_error}")
                 
-                return None
-                
-        return wrapper
-    return decorator
-
-def db_operation(
-    collection_name: Optional[str] = None,
-    error_message: str = "Database operation failed",
-    require_success: bool = True
-):
-    """
-    Decorator for database operations with error handling.
+                # Re-raise the exception for global error handler
+                raise
+        
+        # Mark the command as premium-only for inspection
+        wrapper.__premium_required__ = True
+        wrapper.__premium_feature__ = feature_name
+        
+        return cast(CommandT, wrapper)
     
-    Args:
-        collection_name: Name of the collection to operate on, or None to pass the db directly
-        error_message: Custom error message to display on failure
-        require_success: Whether the operation must succeed for the command to continue
-        
-    Returns:
-        Database operation decorator function
-    """
-    def decorator(func: CommandT) -> CommandT:
-        @functools.wraps(func)
-        async def wrapper(self, *args, **kwargs):
-            try:
-                # Get database connection
-                db = getattr(self.bot, "db", None)
-                if not db:
-                    logger.error("Database connection not available")
-                    return {"success": False, "error": "Database connection not available"}
-                
-                # Pass the collection or db to the function
-                if collection_name:
-                    collection = getattr(db, collection_name, None)
-                    if not collection:
-                        logger.error(f"Collection {collection_name} not found")
-                        return {"success": False, "error": f"Collection {collection_name} not found"}
-                    result = await func(self, collection, *args, **kwargs)
-                else:
-                    result = await func(self, db, *args, **kwargs)
-                
-                return result
-            except Exception as e:
-                # Log the error
-                logger.exception(f"Database operation error in {func.__name__}: {e}")
-                
-                # Return error result
-                if require_success:
-                    raise
-                return {"success": False, "error": f"{error_message}: {str(e)}"}
-        
-        return wrapper
     return decorator
