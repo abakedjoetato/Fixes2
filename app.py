@@ -30,27 +30,31 @@ def start_discord_bot():
     
     try:
         logger.info("Starting Discord bot from app.py shim...")
-        # Run our launcher script
+        # Run our existing launcher script
         bot_process = subprocess.Popen(
-            ["bash", "launcher.sh"],
+            ["bash", "run_discord_bot.sh"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
             preexec_fn=os.setsid
         )
         
-        # Log output from bot process
+        # Log first few lines of output from bot process to show startup
+        startup_lines = 0
+        max_startup_lines = 20
+        
+        logger.info("Bot starting - showing first few lines of output...")
         for line in bot_process.stdout:
             sys.stdout.write(line)
             sys.stdout.flush()
+            startup_lines += 1
+            if startup_lines >= max_startup_lines:
+                logger.info("Bot startup complete - further logs will be in bot.log")
+                break
         
-        # Wait for process to complete
-        bot_process.wait()
-        
-        if bot_process.returncode != 0:
-            logger.error(f"Discord bot process exited with code {bot_process.returncode}")
-        else:
-            logger.info("Discord bot process exited successfully")
+        # Don't wait for process to complete - we want it to keep running
+        logger.info("Discord bot process is now running in the background")
+        logger.info("Monitor the bot.log file for ongoing logs")
             
     except Exception as e:
         logger.error(f"Failed to start Discord bot process: {e}")
@@ -93,7 +97,24 @@ if __name__ == "__main__":
     
     # Keep this process alive
     try:
+        logger.info("Main process entering monitor loop")
+        
+        # Check if bot process is still running
+        iteration = 0
         while True:
             time.sleep(10)
+            
+            # Print a heartbeat message every minute (6 iterations)
+            iteration += 1
+            if iteration % 6 == 0:
+                if bot_process and bot_process.poll() is None:
+                    logger.info("Heartbeat: Discord bot is still running")
+                else:
+                    logger.warning("Heartbeat: Discord bot process has stopped!")
+                    
+                    # If bot process has stopped unexpectedly, restart it
+                    if bot_process and bot_process.poll() is not None:
+                        logger.info("Attempting to restart Discord bot process...")
+                        start_discord_bot()
     except KeyboardInterrupt:
         cleanup(None, None)

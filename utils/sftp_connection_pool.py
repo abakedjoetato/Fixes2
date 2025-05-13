@@ -248,8 +248,8 @@ class SFTPConnectionPool:
         guild_id: str,
         host: str,
         port: int = 22,
-        username: str = None,
-        password: str = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         timeout: int = DEFAULT_CONNECTION_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: int = DEFAULT_RETRY_DELAY,
@@ -284,9 +284,17 @@ class SFTPConnectionPool:
             logger.info("Connection pool not started, starting now")
             await self.start()
             
+        # Parameter validation
+        if host is None:
+            raise ValueError("Host cannot be None")
+            
         # Normalize connection parameters
         host = host.strip()
         username = username.strip() if username else ""
+        
+        # Set default username if none provided
+        if not username:
+            username = "anonymous"
         
         # Generate connection key
         conn_key = f"{host}:{port}:{username}:{guild_id}"
@@ -818,8 +826,8 @@ class SFTPContextManager:
         guild_id: str,
         host: str,
         port: int = 22,
-        username: str = None,
-        password: str = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         timeout: int = DEFAULT_CONNECTION_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: int = DEFAULT_RETRY_DELAY,
@@ -858,7 +866,18 @@ class SFTPContextManager:
         
         Returns:
             SFTP client object
+            
+        Raises:
+            ValueError: If required parameters are missing
         """
+        # Parameter validation
+        if self.host is None:
+            raise ValueError("Host cannot be None")
+            
+        # Default username if none provided
+        if not self.username:
+            self.username = "anonymous"
+            
         self.pool = await get_connection_pool()
         
         # Get a connection

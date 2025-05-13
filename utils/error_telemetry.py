@@ -321,6 +321,23 @@ class ErrorTelemetry:
         # Mark as initialized
         _telemetry_initialized = True
     
+    @classmethod
+    async def get_error_id(cls, error):
+        """Get a unique identifier for an error
+        
+        Args:
+            error: The error object
+            
+        Returns:
+            String identifier for the error
+        """
+        if isinstance(error, Exception):
+            # Use error fingerprinting to generate ID
+            return get_error_fingerprint(error)
+        
+        # For non-exception errors, generate a simple hash
+        return hashlib.md5(str(error).encode()).hexdigest()
+    
     @staticmethod
     async def track_error(error, context=None, category=None, flush=False):
         """Track an error with context
@@ -429,7 +446,7 @@ class ErrorTelemetry:
         """Flush the error buffer to the database"""
         global _error_buffer, _db, _stats
         
-        if not _db:
+        if _db is None:
             logger.warning("Cannot flush error buffer: database not initialized")
             return False
         
@@ -548,7 +565,7 @@ class ErrorTelemetry:
         Returns:
             Dictionary with error statistics
         """
-        if not _db:
+        if _db is None:
             return {"error": "Database not initialized"}
         
         stats = {}
@@ -655,7 +672,7 @@ class ErrorTelemetry:
         Returns:
             Dictionary with error details
         """
-        if not _db:
+        if _db is None:
             return {"error": "Database not initialized"}
         
         try:

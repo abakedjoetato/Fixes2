@@ -1,0 +1,2 @@
+[discord-bot]
+run = "bash run_discord_bot.sh"
