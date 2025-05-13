@@ -46,6 +46,10 @@ class Bot(commands.Bot):
             auto_sync_commands=True
         )
 
+        # Import our utility functions for command tree management
+        from utils.command_tree import create_command_tree
+        from utils.command_imports import is_compatible_with_pycord_261
+        
         # Bot configuration
         self.production = production
         self.debug_guilds = debug_guilds
@@ -78,11 +82,17 @@ class Bot(commands.Bot):
         # Create the command tree using our compatibility layer
         # Store it in a custom attribute to avoid conflicts
         try:
+            # Set up our command management based on the library version
             self._command_tree_instance = create_command_tree(self)
+            
+            # Store the library compatibility information for reference
+            self.is_pycord_261 = is_compatible_with_pycord_261()
+            logger.info(f"Bot initialized with py-cord 2.6.1 compatibility: {self.is_pycord_261}")
         except Exception as e:
             logger.error(f"Error creating command tree: {e}")
             # Let the bot start anyway
             self._command_tree_instance = None
+            self.is_pycord_261 = False
 
         # Register error handlers
         self.setup_error_handlers()
@@ -373,6 +383,9 @@ class Bot(commands.Bot):
             check_guilds: Whether to check guilds (default: True)
             delete_existing: Whether to delete existing commands (default: False)
         """
+        # Import sync utility - local import to avoid circular imports
+        from utils.command_tree import sync_command_tree
+        
         # Prevent multiple concurrent syncs
         if Bot._sync_in_progress:
             logger.warning("Command sync already in progress, skipping duplicate sync")
@@ -381,39 +394,34 @@ class Bot(commands.Bot):
         try:
             Bot._sync_in_progress = True
             
-            if self.debug_guilds is not None:
-                # Sync to specific debug guilds only
-                for guild_id in self.debug_guilds:
-                    try:
-                        # Get the guild object
-                        guild = self.get_guild(guild_id)
-                        
-                        if guild is not None:
-                            # Sync commands to this guild
-                            await self.tree.sync(guild=guild)
-                            
-                            # Get guild name safely
-                            guild_name = ""
-                            try:
-                                if hasattr(guild, 'name') and guild.name is not None:
-                                    guild_name = guild.name
-                            except AttributeError:
-                                pass
-                            
-                            logger.info(f"Synced commands to guild {guild_name} ({guild_id})")
-                        else:
-                            logger.warning(f"Could not find guild with ID {guild_id}")
-                    except Exception as e:
-                        logger.error(f"Error syncing commands to guild {guild_id}: {e}")
-                        logger.error(traceback.format_exc())
+            # Use our compatibility layer to sync commands based on py-cord version
+            logger.info("Starting command synchronization")
+            
+            # If guild_ids is provided, use it, otherwise use debug_guilds if available
+            target_guild_ids = guild_ids or self.debug_guilds
+            
+            # Determine whether to sync globally
+            sync_global = not register_guild_commands or target_guild_ids is None
+            
+            # Use our compatibility layer for syncing
+            success = await sync_command_tree(
+                bot=self,
+                command_tree=self._command_tree_instance,
+                guild_ids=target_guild_ids,
+                sync_global=sync_global
+            )
+            
+            if success:
+                if target_guild_ids:
+                    logger.info(f"Successfully synced commands to {len(target_guild_ids)} guilds")
+                if sync_global:
+                    logger.info("Successfully synced global commands")
             else:
-                try:
-                    # Global sync - just do this once
-                    await self.tree.sync()
-                    logger.info("Application commands synced!")
-                except Exception as e:
-                    logger.error(f"Error syncing commands globally: {e}")
-                    logger.error(traceback.format_exc())
+                logger.warning("Command sync may not have completed successfully")
+                
+        except Exception as e:
+            logger.error(f"Error syncing commands: {e}")
+            logger.error(traceback.format_exc())
         finally:
             Bot._sync_in_progress = False
 
