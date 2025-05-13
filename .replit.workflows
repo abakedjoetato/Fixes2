@@ -1,2 +1,8 @@
 [workflows."Start Discord Bot"]
     command = ["python", "run_discord_bot.py"]
+    
+[workflows."Run Integration Tests"]
+    command = ["python", "integration_test.py"]
+    
+[workflows."Py-cord 2.6.1 Compatibility Test"]
+    command = ["python", "test_pycord_compatibility.py"]

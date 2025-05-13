@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Union, Literal, Any
 from utils.command_handlers import command_handler, db_operation
 from utils.safe_mongodb import SafeMongoDBResult, SafeDocument
 from utils.discord_utils import get_guild_document, server_id_autocomplete
+from utils.interaction_handlers import safely_respond_to_interaction, defer_interaction
 
 logger = logging.getLogger(__name__)
 

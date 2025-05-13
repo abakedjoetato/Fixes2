@@ -222,7 +222,7 @@ async def find_documents_safely(collection, query: Dict[str, Any],
         logger.error(f"Error finding documents: {e}")
         return []
 
-# Additional safe database access functions
+# Enhanced safe database access functions
 async def safe_get_db(db_instance, db_name: Optional[str] = None):
     """
     Safely get a database instance with error handling
@@ -235,18 +235,36 @@ async def safe_get_db(db_instance, db_name: Optional[str] = None):
         Database instance or None if error occurs
     """
     if db_instance is None:
-        logger.error("No database instance provided")
+        logger.warning("Database instance is None in safe_get_db")
         return None
-    
+        
     try:
-        if db_name:
+        # Get the database by name if provided
+        if db_name is not None:
             return db_instance[db_name]
-        elif hasattr(db_instance, 'get_default_database'):
+            
+        # Try common methods to get a default database
+        if hasattr(db_instance, 'get_default_database'):
             return db_instance.get_default_database()
-        else:
-            return db_instance  # Assume db_instance is already a database
+            
+        if hasattr(db_instance, 'defaultDb') and db_instance.defaultDb is not None:
+            return db_instance.defaultDb
+        
+        # Try to get the database name from the connection string
+        if hasattr(db_instance, 'address') and '/' in db_instance.address:
+            # Parse the connection string to extract database name
+            db_name_from_uri = db_instance.address.split('/')[-1].split('?')[0]
+            if db_name_from_uri:
+                return db_instance[db_name_from_uri]
+        
+        # Last resort: return the instance itself if it appears to be a database
+        if hasattr(db_instance, 'collection_names') or hasattr(db_instance, 'list_collection_names'):
+            return db_instance
+            
+        logger.warning("Could not determine database from instance")
+        return db_instance  # Assume it's already a database
     except Exception as e:
-        logger.error(f"Error getting database: {e}")
+        logger.error(f"Error accessing database: {e}")
         return None
 
 async def safe_get_collection(db, collection_name: str):
@@ -261,17 +279,31 @@ async def safe_get_collection(db, collection_name: str):
         Collection instance or None if error occurs
     """
     if db is None:
-        logger.error("No database instance provided")
+        logger.warning(f"Database is None when accessing collection {collection_name}")
         return None
-    
+        
     if not collection_name:
-        logger.error("No collection name provided")
+        logger.warning("No collection name provided")
         return None
-    
+        
     try:
+        # Check if db is a motor client instead of a database
+        if hasattr(db, 'get_database'):
+            # It's a client, try to get default database
+            try:
+                default_db_name = db.get_default_database().name
+                db = db[default_db_name]
+                logger.info(f"Using default database: {default_db_name}")
+            except Exception as e:
+                logger.error(f"Error getting default database: {e}")
+                # Try a fallback name
+                db = db.get_database('tower_temptation')
+                logger.info("Using fallback database: tower_temptation")
+        
+        # Now get the collection
         return db[collection_name]
     except Exception as e:
-        logger.error(f"Error getting collection {collection_name}: {e}")
+        logger.error(f"Error accessing collection {collection_name}: {e}")
         return None
 
 async def safe_find_one(collection, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -288,7 +320,7 @@ async def safe_find_one(collection, query: Dict[str, Any]) -> Optional[Dict[str,
     return await get_document_safely(collection, query)
 
 async def safe_update_one(collection, query: Dict[str, Any], update: Dict[str, Any], 
-                         upsert: bool = False) -> bool:
+                        upsert: bool = False) -> bool:
     """
     Safely update a document with error handling
     
@@ -301,7 +333,7 @@ async def safe_update_one(collection, query: Dict[str, Any], update: Dict[str, A
     Returns:
         True if successful, False otherwise
     """
-    return await safely_update_document(collection, query, update, upsert)
+    return await safely_update_document(collection, query, update, upsert=upsert)
 
 async def safe_insert_one(collection, document: Dict[str, Any]) -> Optional[str]:
     """

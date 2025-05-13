@@ -9,10 +9,43 @@ from typing import Dict, Any, Optional, Union, List
 
 # Import safe database utilities
 from utils.safe_database import (
-    safe_get_db, safe_get_collection, safe_get_document_field,
-    safe_find_one, safe_update_one, safe_insert_one, safe_count_documents,
-    safe_document_to_dict, has_field, is_db_available, SafeDocument
+    get_document_safely as safe_find_one,
+    safely_update_document as safe_update_one,
+    safe_insert_one,
+    count_documents_safely as safe_count_documents,
+    safe_get as safe_get_document_field,
+    safe_document_to_dict,
+    has_field, 
+    is_db_available,
+    SafeDocument
 )
+
+# Create local versions of functions that don't exist in safe_database yet
+async def safe_get_db(db_instance, db_name=None):
+    """Safely get a database instance"""
+    if db_instance is None:
+        logger.error("No database instance provided")
+        return None
+    
+    try:
+        if db_name:
+            return db_instance[db_name]
+        return db_instance
+    except Exception as e:
+        logger.error(f"Error getting database: {e}")
+        return None
+
+async def safe_get_collection(db, collection_name):
+    """Safely get a collection from a database"""
+    if db is None:
+        logger.error("No database instance provided")
+        return None
+    
+    try:
+        return db[collection_name]
+    except Exception as e:
+        logger.error(f"Error getting collection {collection_name}: {e}")
+        return None
 
 logger = logging.getLogger("discord_bot")
 
