@@ -98,11 +98,64 @@ class Bot(commands.Bot):
             logger.error(error_msg)
             logger.error("".join(traceback.format_exception(exc_type, exc_value, exc_traceback)))
 
+            # Extract context information from args
+            guild_id = None
+            channel_id = None
+            user_id = None
+            message_id = None
+                
+            for arg in args:
+                # Extract guild information
+                if hasattr(arg, 'guild') and arg.guild:
+                    guild_id = str(arg.guild.id)
+                
+                # Extract channel information
+                if hasattr(arg, 'channel') and arg.channel:
+                    channel_id = str(arg.channel.id)
+                
+                # Extract user/author information
+                if hasattr(arg, 'user') and arg.user:
+                    user_id = str(arg.user.id)
+                elif hasattr(arg, 'author') and arg.author:
+                    user_id = str(arg.author.id)
+                
+                # Extract message information
+                if hasattr(arg, 'id') and isinstance(arg, discord.Message):
+                    message_id = str(arg.id)
+                
+                # Break if we found all the context we need
+                if guild_id and channel_id and user_id and message_id:
+                    break
+            
+            # Create context for telemetry
+            context = {
+                "event": event,
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "message_id": message_id
+            }
+            
+            # Track with error telemetry system if available
+            try:
+                from utils.error_telemetry import ErrorTelemetry
+                await ErrorTelemetry.track_error(
+                    error=exc_value,
+                    context=context,
+                    category="discord_event"
+                )
+            except (ImportError, AttributeError) as telemetry_error:
+                # Fall back to simple error recording if telemetry not available
+                logger.warning(f"Error telemetry system not available: {telemetry_error}")
+
             # Update bot_status
             self._bot_status["last_error"] = {
                 "time": datetime.now().isoformat(),
                 "event": event,
-                "error": str(exc_value)
+                "error": str(exc_value),
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "user_id": user_id
             }
 
     @property
@@ -572,34 +625,98 @@ class Bot(commands.Bot):
         
         error_context = {
             "command_name": ctx.command.name if ctx.command else "Unknown",
-            "guild_id": guild_id,
+            "guild_id": str(guild_id) if guild_id is not None else None,
             "guild_name": guild_name,
-            "channel_id": channel_id,
-            "user_id": user_id,
-            "message_content": ctx.message.content[:100] if hasattr(ctx, 'message') else None
+            "channel_id": str(channel_id) if channel_id is not None else None,
+            "user_id": str(user_id) if user_id is not None else None,
+            "message_content": ctx.message.content[:100] if hasattr(ctx, 'message') else None,
+            "prefix_used": ctx.prefix if hasattr(ctx, "prefix") else None,
+            "args": ctx.args[1:] if hasattr(ctx, "args") and ctx.args else [],
+            "kwargs": ctx.kwargs if hasattr(ctx, "kwargs") else {}
         }
         
-        # Use our custom logging
-        if isinstance(error, BotBaseException):
-            log_exception(error, error_context)
-        else:
-            # Wrap unknown exceptions in a CommandError
-            command_name = ctx.command.name if ctx.command else "Unknown"
-            wrapped_error = CommandError(
-                f"Unexpected error in command {command_name}: {str(error)}",
-                command_name=command_name,
-                user_id=user_id,
-                guild_id=guild_id
-            )
-            log_exception(wrapped_error, error_context)
-
-        # Format and send a user-friendly error message
+        # Track with error telemetry system if available
         try:
-            user_message = format_user_error_message(error)
-            await ctx.send(user_message)
+            from utils.error_telemetry import ErrorTelemetry
+            
+            # Track the error with telemetry
+            await ErrorTelemetry.track_error(
+                error=error,
+                context=error_context,
+                category="prefix_command"
+            )
+        except (ImportError, AttributeError) as telemetry_error:
+            logger.warning(f"Error telemetry not available: {telemetry_error}")
+            # Fall back to legacy error logging
+            if isinstance(error, BotBaseException):
+                log_exception(error, error_context)
+            else:
+                # Wrap unknown exceptions in a CommandError
+                command_name = ctx.command.name if ctx.command else "Unknown"
+                wrapped_error = CommandError(
+                    f"Unexpected error in command {command_name}: {str(error)}",
+                    command_name=command_name,
+                    user_id=user_id,
+                    guild_id=guild_id
+                )
+                log_exception(wrapped_error, error_context)
+
+        # Format and send a user-friendly error message with enhanced feedback
+        try:
+            # Try to use the new user feedback system first
+            try:
+                from utils.user_feedback import create_error_embed, get_suggestion_for_error
+                from utils.error_handlers import handle_command_error, send_error_response
+                
+                # Generate error ID if available through telemetry
+                error_id = None
+                try:
+                    from utils.error_telemetry import ErrorTelemetry
+                    error_id = await ErrorTelemetry.get_error_id(error)
+                except (ImportError, AttributeError):
+                    pass
+                
+                # Get error type for better suggestions
+                error_type = "general"
+                if isinstance(error, commands.MissingRequiredArgument):
+                    error_type = "invalid_input"
+                elif isinstance(error, commands.BadArgument):
+                    error_type = "invalid_format"
+                elif isinstance(error, commands.MissingPermissions):
+                    error_type = "missing_permission"
+                elif isinstance(error, commands.CommandOnCooldown):
+                    error_type = "discord_rate_limit"
+                
+                # Create a detailed error embed
+                embed = create_error_embed(
+                    title=f"Error in {ctx.command.name if ctx.command else 'command'}",
+                    description=str(error),
+                    error_type=error_type,
+                    error_id=error_id
+                )
+                
+                # Add command usage if available
+                if ctx.command and hasattr(ctx.command, 'signature'):
+                    embed.add_field(
+                        name="Command Usage",
+                        value=f"`{ctx.prefix}{ctx.command.name} {ctx.command.signature}`",
+                        inline=False
+                    )
+                
+                await ctx.send(embed=embed)
+                
+            except (ImportError, AttributeError) as fb_error:
+                # Fall back to simple error message if feedback module not available
+                logger.warning(f"User feedback system not available: {fb_error}")
+                
+                # Use legacy error message formatter
+                user_message = format_user_error_message(error)
+                await ctx.send(user_message)
+                
         except Exception as msg_error:
             # Fallback message if error formatting fails
             logger.error(f"Error sending error message: {msg_error}")
+            logger.error(traceback.format_exc())
             await ctx.send("An error occurred while processing this command. The error has been logged.")
 
     async def on_application_command_error(self, context: Any, exception: Exception):
@@ -819,12 +936,53 @@ class Bot(commands.Bot):
             # Also log the original traceback
             logger.error(f"Original exception in {command_name}:", exc_info=error)
 
-        # Format and send a user-friendly error message
+        # Format and send a user-friendly error message with enhanced feedback
         try:
-            user_message = format_user_error_message(error)
-            await self._respond_to_interaction(interaction, user_message, ephemeral=True)
+            # Try to use the new user feedback system first
+            try:
+                from utils.user_feedback import create_error_embed, get_suggestion_for_error
+                from utils.error_handlers import handle_command_error, send_error_response
+                
+                # Generate error ID if available through telemetry
+                error_id = None
+                try:
+                    from utils.error_telemetry import ErrorTelemetry
+                    error_id = await ErrorTelemetry.get_error_id(error)
+                except (ImportError, AttributeError):
+                    pass
+                
+                # Get error type for better suggestions
+                error_type = "general"
+                if isinstance(error, commands.MissingPermissions):
+                    error_type = "missing_permission"
+                elif isinstance(error, commands.CommandOnCooldown):
+                    error_type = "discord_rate_limit"
+                elif isinstance(error, PremiumFeatureError):
+                    error_type = "premium_required"
+                
+                # Create a detailed error embed
+                embed = create_error_embed(
+                    title=f"Error in /{command_name}",
+                    description=str(error),
+                    error_type=error_type,
+                    error_id=error_id
+                )
+                
+                # Send the error embed response
+                await self._respond_to_interaction(interaction, embed, ephemeral=True)
+                
+            except (ImportError, AttributeError) as fb_error:
+                # Fall back to simple error message if feedback module not available
+                logger.warning(f"User feedback system not available: {fb_error}")
+                
+                # Use legacy error message formatter
+                user_message = format_user_error_message(error)
+                await self._respond_to_interaction(interaction, user_message, ephemeral=True)
+                
         except Exception as notification_error:
             logger.error(f"Failed to send error message to user: {notification_error}")
+            logger.error(traceback.format_exc())
+            
             # Last resort - try a very simple approach
             try:
                 if not interaction.response.is_done():
